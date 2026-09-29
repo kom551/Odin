@@ -1,0 +1,23 @@
+{
+  "name": "odin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "packageManager": "pnpm@11.23.0",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "dev:web": "pnpm --filter @odin/web dev",
+    "dev:api": "pnpm --filter @odin/api dev",
+    "start:prod": "pnpm --filter @odin/api start",
+    "build": "pnpm -r build",
+    "type-check": "pnpm -r type-check",
+    "test": "pnpm -r test",
+    "test:unit": "pnpm --filter @odin/web test:unit",
+    "smoke": "pnpm --filter @odin/api smoke",
+    "lint": "pnpm -r lint",
+    "format": "pnpm -r format"
+  }
+}

@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  @apply bg-slate-50 text-ink antialiased;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+@layer utilities {
+  .safe-top {
+    padding-top: env(safe-area-inset-top);
+  }
+
+  /* 兼容不支持 dvh 单位的旧浏览器（iOS < 15.4、旧 Android WebView） */
+  .min-h-screen-dvh {
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+}

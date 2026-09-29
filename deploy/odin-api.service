@@ -1,0 +1,23 @@
+[Unit]
+Description=Odin API (Hono + SQLite)
+After=network.target
+
+[Service]
+Type=simple
+# 建议为项目单独创建系统用户（示例 odin）
+User=odin
+Group=odin
+# 按实际部署路径修改（apps/api 目录）
+WorkingDirectory=/opt/odin/apps/api
+ExecStart=/usr/bin/env node dist/index.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+# 可按需覆盖配置（apps/api/.env 会被自动加载，优先级：环境变量 > .env）
+# Environment=PORT=3001
+# Environment=DATABASE_PATH=/opt/odin/apps/api/data/odin.db
+# Environment=UPLOAD_DIR=/opt/odin/apps/api/data/uploads
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
