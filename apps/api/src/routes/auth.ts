@@ -39,7 +39,7 @@ authRoute.post('/access-code', async (c) => {
   }
 
   const db = getDb()
-  const code = db.select().from(accessCodes).where(eq(accessCodes.code, parsed.data.code)).get()
+  const code = await db.select().from(accessCodes).where(eq(accessCodes.code, parsed.data.code)).get()
   if (!code || code.status !== 'active') {
     return c.json(openAiError('invalid_access_code', '访问码无效或已停用', 401), 401)
   }
@@ -47,7 +47,8 @@ authRoute.post('/access-code', async (c) => {
   const now = Date.now()
   const expiresAt = now + tokenTtlMs()
   const token = randomBytes(32).toString('hex')
-  db.insert(deviceTokens)
+  await db
+    .insert(deviceTokens)
     .values({ token, accessCodeId: code.id, expiresAt, createdAt: now })
     .run()
 
@@ -55,11 +56,11 @@ authRoute.post('/access-code', async (c) => {
 })
 
 /** 退出登录：吊销当前令牌 */
-authRoute.post('/logout', (c) => {
+authRoute.post('/logout', async (c) => {
   const token = bearerToken(c)
   if (token) {
     const db = getDb()
-    db.delete(deviceTokens).where(eq(deviceTokens.token, token)).run()
+    await db.delete(deviceTokens).where(eq(deviceTokens.token, token)).run()
   }
   return c.json({ status: 200, message: 'ok', data: null })
 })

@@ -19,26 +19,30 @@ tasksRoute.use('/submissions/*', userAuth)
 tasksRoute.use('/progress', userAuth)
 
 /** 已发布任务列表 */
-tasksRoute.get('/tasks', (c) => {
+tasksRoute.get('/tasks', async (c) => {
   const db = getDb()
-  const rows = db.select().from(tasks).where(eq(tasks.status, 'published')).orderBy(desc(tasks.createdAt)).all()
-  const data = rows.map((task) => ({
-    ...toPublicTask(task),
-    stageCount: db.select({ id: stages.id }).from(stages).where(eq(stages.taskId, task.id)).all().length,
-  }))
+  const rows = await db.select().from(tasks).where(eq(tasks.status, 'published')).orderBy(desc(tasks.createdAt)).all()
+  const data = await Promise.all(
+    rows.map(async (task) => ({
+      ...toPublicTask(task),
+      stageCount: (
+        await db.select({ id: stages.id }).from(stages).where(eq(stages.taskId, task.id)).all()
+      ).length,
+    })),
+  )
   return c.json({ status: 200, message: 'ok', data })
 })
 
 /** 任务详情 + 我的进度 */
-tasksRoute.get('/tasks/:id', (c) => {
+tasksRoute.get('/tasks/:id', async (c) => {
   const taskId = Number(c.req.param('id'))
   const db = getDb()
-  const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get()
+  const task = await db.select().from(tasks).where(eq(tasks.id, taskId)).get()
   if (!task) return c.json(openAiError('not_found', '任务不存在', 404), 404)
   if (task.status !== 'published') return c.json(openAiError('not_found', '任务不存在', 404), 404)
 
-  const stageRows = db.select().from(stages).where(eq(stages.taskId, taskId)).orderBy(stages.order).all()
-  const myProgress = db.select().from(progress).where(eq(progress.taskId, taskId)).get()
+  const stageRows = await db.select().from(stages).where(eq(stages.taskId, taskId)).orderBy(stages.order).all()
+  const myProgress = await db.select().from(progress).where(eq(progress.taskId, taskId)).get()
   const currentStage = myProgress
     ? stageRows.find((stage) => stage.order === myProgress.currentStageOrder) ?? null
     : null
@@ -67,17 +71,18 @@ tasksRoute.post('/tasks/:id/stages/:stageId/submissions', async (c) => {
   const { images } = parsed.data
   const db = getDb()
 
-  const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get()
+  const task = await db.select().from(tasks).where(eq(tasks.id, taskId)).get()
   if (!task || task.status !== 'published') {
     return c.json(openAiError('not_found', '任务不存在或未发布', 404), 404)
   }
-  const stage = db.select().from(stages).where(eq(stages.id, stageId)).get()
+  const stage = await db.select().from(stages).where(eq(stages.id, stageId)).get()
   if (!stage || stage.taskId !== taskId) {
     return c.json(openAiError('not_found', '环节不存在', 404), 404)
   }
 
   // 获取或创建进度
-  db.insert(progress)
+  await db
+    .insert(progress)
     .values({
       taskId,
       currentStageOrder: 1,
@@ -87,7 +92,7 @@ tasksRoute.post('/tasks/:id/stages/:stageId/submissions', async (c) => {
     })
     .onConflictDoNothing()
     .run()
-  const row = db.select().from(progress).where(eq(progress.taskId, taskId)).get()!
+  const row = (await db.select().from(progress).where(eq(progress.taskId, taskId)).get())!
 
   if (row.status === 'completed') {
     return c.json(openAiError('invalid_state', '任务已通关，无法继续提交', 409), 409)
@@ -98,34 +103,36 @@ tasksRoute.post('/tasks/:id/stages/:stageId/submissions', async (c) => {
       400,
     )
   }
-  const uploaded = db.select({ url: uploads.url }).from(uploads).all()
+  const uploaded = await db.select({ url: uploads.url }).from(uploads).all()
   const knownUrls = new Set(uploaded.map((u) => u.url))
   if (images.some((url) => !knownUrls.has(url))) {
     return c.json(openAiError('invalid_request_error', '包含未上传的图片 URL', 400), 400)
   }
 
   const attempt =
-    (db
+    ((await db
       .select({ n: count() })
       .from(submissions)
       .where(eq(submissions.stageId, stageId))
-      .get()?.n ?? 0) + 1
+      .get())?.n ?? 0) + 1
 
   const now = Date.now()
   const submissionId = Number(
-    db
-      .insert(submissions)
-      .values({
-        taskId,
-        stageId,
-        attempt,
-        images,
-        status: 'reviewing',
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning({ id: submissions.id })
-      .get().id,
+    (
+      await db
+        .insert(submissions)
+        .values({
+          taskId,
+          stageId,
+          attempt,
+          images,
+          status: 'reviewing',
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: submissions.id })
+        .get()
+    ).id,
   )
 
   enqueueReview(() => reviewSubmission(submissionId))
@@ -134,25 +141,25 @@ tasksRoute.post('/tasks/:id/stages/:stageId/submissions', async (c) => {
 })
 
 /** 轮询审核结果 */
-tasksRoute.get('/submissions/:id', (c) => {
+tasksRoute.get('/submissions/:id', async (c) => {
   const submissionId = Number(c.req.param('id'))
   const db = getDb()
-  const row = db.select().from(submissions).where(eq(submissions.id, submissionId)).get()
+  const row = await db.select().from(submissions).where(eq(submissions.id, submissionId)).get()
   if (!row) return c.json(openAiError('not_found', '提交不存在', 404), 404)
   return c.json({ status: 200, message: 'ok', data: row })
 })
 
 /** 任务进度 */
-tasksRoute.get('/progress', (c) => {
+tasksRoute.get('/progress', async (c) => {
   const taskId = Number(c.req.query('taskId') || 0)
   if (!taskId) {
     return c.json(openAiError('invalid_request_error', '缺少 taskId', 400), 400)
   }
   const db = getDb()
-  const row = db.select().from(progress).where(eq(progress.taskId, taskId)).get()
+  const row = await db.select().from(progress).where(eq(progress.taskId, taskId)).get()
   if (!row) return c.json({ status: 200, message: 'ok', data: null })
 
-  const stage = db.select().from(stages).where(and(eq(stages.taskId, taskId), eq(stages.order, row.currentStageOrder))).get()
+  const stage = await db.select().from(stages).where(and(eq(stages.taskId, taskId), eq(stages.order, row.currentStageOrder))).get()
   return c.json({
     status: 200,
     message: 'ok',
@@ -164,12 +171,12 @@ tasksRoute.get('/progress', (c) => {
 })
 
 /** 通关码 */
-tasksRoute.get('/tasks/:id/passcode', (c) => {
+tasksRoute.get('/tasks/:id/passcode', async (c) => {
   const taskId = Number(c.req.param('id'))
   const db = getDb()
-  const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get()
+  const task = await db.select().from(tasks).where(eq(tasks.id, taskId)).get()
   if (!task) return c.json(openAiError('not_found', '任务不存在', 404), 404)
-  const row = db
+  const row = await db
     .select({ status: progress.status, completedAt: progress.completedAt })
     .from(progress)
     .where(eq(progress.taskId, taskId))

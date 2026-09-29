@@ -62,8 +62,8 @@ function createMockUpstream(): Promise<{ port: number; close: () => Promise<void
 }
 
 async function main() {
-  process.env.DATABASE_PATH = path.join(os.tmpdir(), `odin-smoke-${Date.now()}.db`)
-  migrateDatabase()
+  process.env.DATABASE_URL = `file:${path.join(os.tmpdir(), `odin-smoke-${Date.now()}.db`)}`
+  await migrateDatabase()
 
   const upstream = await createMockUpstream()
   process.env.LLM_BASE_URL = `http://127.0.0.1:${upstream.port}`

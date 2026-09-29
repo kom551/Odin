@@ -1,7 +1,7 @@
 import { serve } from '@hono/node-server'
 import { createApp } from './app'
 import { loadConfig } from './config'
-import { closeDb, getDatabasePath } from './db/client'
+import { closeDb, getDatabaseUrl } from './db/client'
 import { migrateDatabase } from './db/migrate'
 import { loadEnv } from './env'
 
@@ -13,8 +13,8 @@ if (!process.env.ADMIN_KEY) {
   console.warn('[odin-api] 警告：未配置 ADMIN_KEY，管理页面接口将返回 403（请在 apps/api/.env 中设置）')
 }
 
-migrateDatabase()
-console.log(`[odin-api] sqlite ready: ${getDatabasePath()}`)
+await migrateDatabase()
+console.log(`[odin-api] database ready: ${getDatabaseUrl()}`)
 
 const server = serve(
   { fetch: app.fetch, port: config.port, hostname: config.host },

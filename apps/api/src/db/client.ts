@@ -1,36 +1,40 @@
-import path from 'node:path'
-import { mkdirSync } from 'node:fs'
-
-import Database from 'better-sqlite3'
-import { drizzle } from 'drizzle-orm/better-sqlite3'
+import { createClient } from '@libsql/client'
+import { drizzle, type LibSQLDatabase } from 'drizzle-orm/libsql'
 
 import * as schema from './schema'
 
-export function getDatabasePath(): string {
-  const explicit = process.env.DATABASE_PATH?.trim()
-  if (explicit) return path.resolve(explicit)
-  return path.resolve(process.cwd(), 'data/odin.db')
+/**
+ * 数据库连接串（libSQL / Turso）：
+ * - 本地默认 `file:data/odin.db`（相对进程 cwd）
+ * - 兼容旧变量 DATABASE_PATH（视为本地文件路径）
+ * - Vercel 上未配置时退化为 /tmp 临时库（仅演示，生产必须配置 Turso DATABASE_URL）
+ */
+export function getDatabaseUrl(): string {
+  const legacy = process.env.DATABASE_PATH?.trim()
+  const url = process.env.DATABASE_URL?.trim() || (legacy ? `file:${legacy}` : '')
+  if (url) return url
+  return process.env.VERCEL ? 'file:/tmp/odin.db' : 'file:data/odin.db'
 }
 
-let raw: Database.Database | null = null
-let db: ReturnType<typeof drizzle<typeof schema>> | null = null
+let db: LibSQLDatabase<typeof schema> | null = null
 
-/** 打开（或复用）SQLite 连接，启用 WAL 与外键约束 */
-export function getDb(): ReturnType<typeof drizzle<typeof schema>> {
+/** 打开（或复用）libSQL 连接。查询为异步 API，调用处需 await。 */
+export function getDb(): LibSQLDatabase<typeof schema> {
   if (db) return db
-  const databasePath = getDatabasePath()
-  mkdirSync(path.dirname(databasePath), { recursive: true })
-  raw = new Database(databasePath)
-  raw.pragma('journal_mode = WAL')
-  raw.pragma('foreign_keys = ON')
-  db = drizzle(raw, { schema })
+  const url = getDatabaseUrl()
+  const client = createClient({
+    url,
+    authToken: process.env.DATABASE_AUTH_TOKEN?.trim() || undefined,
+  })
+  // 本地文件库启用外键约束；远程 Turso 默认开启，且执行 PRAGMA 会报错，这里静默忽略
+  if (url.startsWith('file:')) {
+    void client.execute('PRAGMA foreign_keys = ON').catch(() => undefined)
+  }
+  db = drizzle(client, { schema })
   return db
 }
 
+/** libSQL 客户端无同步 close 语义；本地/远程均由服务端管理连接，保留空实现以兼容调用方 */
 export function closeDb(): void {
-  if (raw) {
-    raw.close()
-    raw = null
-    db = null
-  }
+  db = null
 }

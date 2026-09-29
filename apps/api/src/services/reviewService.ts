@@ -1,8 +1,3 @@
-import { readFileSync } from 'node:fs'
-import path from 'node:path'
-
-import { eq } from 'drizzle-orm'
-
 import {
   aiResultSchema,
   aiResultWithMetaSchema,
@@ -11,9 +6,11 @@ import {
   type ChatContentPart,
 } from '@odin/shared'
 
-import { getUploadsDir } from '../config'
+import { eq } from 'drizzle-orm'
+
 import { getDb } from '../db/client'
-import { stages, submissions, tasks, uploads } from '../db/schema'
+import { stages, submissions, tasks } from '../db/schema'
+import { loadImageDataUri } from './storage'
 import { createProvider } from '../providers/registry'
 import type { ChatProvider, ProviderChatRequest } from '../providers/types'
 import { applyVerdict } from './progress'
@@ -32,17 +29,17 @@ function retryBaseMs(): number {
 /** 审核一条提交（幂等：仅处理 reviewing 状态） */
 export async function reviewSubmission(submissionId: number): Promise<void> {
   const db = getDb()
-  const submission = db
+  const submission = await db
     .select()
     .from(submissions)
     .where(eq(submissions.id, submissionId))
     .get()
   if (!submission || submission.status !== 'reviewing') return
 
-  const stage = db.select().from(stages).where(eq(stages.id, submission.stageId)).get()
-  const task = db.select().from(tasks).where(eq(tasks.id, submission.taskId)).get()
+  const stage = await db.select().from(stages).where(eq(stages.id, submission.stageId)).get()
+  const task = await db.select().from(tasks).where(eq(tasks.id, submission.taskId)).get()
   if (!stage || !task) {
-    rejectAuto(submissionId, '任务或环节不存在', '')
+    await rejectAuto(submissionId, '任务或环节不存在', '')
     return
   }
 
@@ -57,21 +54,21 @@ export async function reviewSubmission(submissionId: number): Promise<void> {
       model: 'auto',
       autoRejected: false,
     }
-    applyVerdict(submissionId, { passed: true, aiResult })
+    await applyVerdict(submissionId, { passed: true, aiResult })
     return
   }
 
   const reviewPrompt = stage.reviewPrompt ?? ''
   if (!reviewPrompt.trim()) {
-    rejectAuto(submissionId, '环节缺少审核提示词', '')
+    await rejectAuto(submissionId, '环节缺少审核提示词', '')
     return
   }
 
   const imageDataUris: string[] = []
   for (const url of submission.images as string[]) {
-    const dataUri = loadImageDataUri(url)
+    const dataUri = await loadImageDataUri(url)
     if (!dataUri) {
-      rejectAuto(submissionId, '图片读取失败，请重新上传', '')
+      await rejectAuto(submissionId, '图片读取失败，请重新上传', '')
       return
     }
     imageDataUris.push(dataUri)
@@ -80,7 +77,7 @@ export async function reviewSubmission(submissionId: number): Promise<void> {
   const modelId = resolveReviewModel()
   const provider = createProvider()
   if (!modelId || !provider) {
-    rejectAuto(
+    await rejectAuto(
       submissionId,
       '审核服务未配置，请在 .env 中配置 LLM_BASE_URL / LLM_MODEL',
       modelId ?? '',
@@ -126,7 +123,7 @@ export async function reviewSubmission(submissionId: number): Promise<void> {
           model: modelId,
           autoRejected: false,
         }
-        applyVerdict(submissionId, { passed: parsed.passed, aiResult })
+        await applyVerdict(submissionId, { passed: parsed.passed, aiResult })
         return
       }
       lastError = '模型输出不符合要求，重试中'
@@ -136,10 +133,10 @@ export async function reviewSubmission(submissionId: number): Promise<void> {
     if (attempt < MAX_ATTEMPTS - 1) await sleep(retryBaseMs() * (attempt + 1))
   }
 
-  rejectAuto(submissionId, lastError || '系统审核异常，请重新提交', modelId)
+  await rejectAuto(submissionId, lastError || '系统审核异常，请重新提交', modelId)
 }
 
-function rejectAuto(submissionId: number, reason: string, model: string): void {
+async function rejectAuto(submissionId: number, reason: string, model: string): Promise<void> {
   const aiResult: AiResultWithMeta = {
     passed: false,
     summary: '系统审核异常，请重新提交',
@@ -149,7 +146,7 @@ function rejectAuto(submissionId: number, reason: string, model: string): void {
     model,
     autoRejected: true,
   }
-  applyVerdict(submissionId, { passed: false, aiResult })
+  await applyVerdict(submissionId, { passed: false, aiResult })
 }
 
 async function callProviderOnce(provider: ChatProvider, request: ProviderChatRequest): Promise<string> {
@@ -218,18 +215,6 @@ export function buildReviewPrompt(input: {
 
 function resolveReviewModel(): string | null {
   return process.env.LLM_MODEL?.trim() || null
-}
-
-function loadImageDataUri(url: string): string | null {
-  const db = getDb()
-  const row = db.select().from(uploads).where(eq(uploads.url, url)).get()
-  if (!row) return null
-  try {
-    const buffer = readFileSync(path.join(getUploadsDir(), row.path))
-    return `data:${row.mime};base64,${buffer.toString('base64')}`
-  } catch {
-    return null
-  }
 }
 
 /** 供测试使用：校验 aiResultWithMeta 落库结构 */

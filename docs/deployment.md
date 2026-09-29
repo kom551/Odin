@@ -22,12 +22,13 @@
 - 前端构建产物在 `apps/web/dist`。
 - API 服务 `apps/api`，默认端口 `3001`，监听 `0.0.0.0`（生产只暴露给本机 Nginx）。
 - 上传图片由 API 的 `/uploads/*` 直接静态托管，URL 存 SQLite。
+- 数据库默认本地 SQLite（`apps/api/data/odin.db`）；生产也可改用 Turso 托管库（见下文 `DATABASE_URL`）。
 
 ## 2. 前置要求
 
-- Node.js **>= 22.12**（建议 22 LTS，与 CI/开发一致；`better-sqlite3` 为原生模块，需与 Node 版本匹配）。
+- Node.js **>= 22.12**（建议 22 LTS，与 CI/开发一致）。
 - pnpm **>= 9**（本项目锁 `pnpm@11.23.0`）。
-- 服务器需可编译原生模块（Ubuntu：`build-essential python3 make g++`），或安装与目标 Node 版本匹配的预编译 `better-sqlite3`。
+- 数据库使用 libSQL：本地 `file:` 模式依赖 `@libsql/client` 自带的预编译二进制；远程 Turso 为纯 HTTP，无原生编译要求。
 - Nginx、可选 certbot（HTTPS 证书）。
 
 ## 3. 目录与文件说明
@@ -60,11 +61,12 @@ vim apps/api/.env
 | `LLM_BASE_URL` | 自定义大模型 Base URL（OpenAI 兼容 chat/completions 接口，必填） |
 | `LLM_MODEL` | 自定义大模型名称（必填） |
 | `LLM_API_KEY` | API Key（可选；自建服务无需鉴权时可留空） |
-| `DATABASE_PATH` | SQLite 文件路径，默认 `<cwd>/data/odin.db` |
-| `UPLOAD_DIR` | 图片上传根目录，默认 `<cwd>/data/uploads` |
+| `DATABASE_URL` | 数据库连接串：本地 `file:<path>`（默认 `file:data/odin.db`），远程 Turso `libsql://<db>.turso.io` |
+| `DATABASE_AUTH_TOKEN` | Turso 访问令牌（仅远程库需要） |
+| `UPLOAD_DIR` | 图片上传根目录（本地兜底），默认 `<cwd>/data/uploads`；Vercel 上用 Blob |
 | `LLM_HTTP_TIMEOUT_MS` | 上游 LLM 请求超时（毫秒，默认 60000） |
 
-> 数据库与上传目录建议放独立数据盘（如 `/var/lib/odin`），并把 `DATABASE_PATH` / `UPLOAD_DIR` 指向那里，便于备份。
+> 数据库与上传目录建议放独立数据盘（如 `/var/lib/odin`）：本地部署用 `DATABASE_URL=file:/var/lib/odin/odin.db`，图片用 `UPLOAD_DIR=/var/lib/odin/uploads` 指向那里，便于备份。
 
 ## 5. 启动 API（进程管理）
 
@@ -206,7 +208,7 @@ sudo nginx -t && sudo systemctl reload nginx
   4. 用浏览器直接打开本地 `dist/index.html`（`file://` 协议）也会报同样错误，应通过 Nginx 或 `pnpm --filter @odin/web preview` 托管；
   5. 检查当前 `dist/index.html` 引用的 hash 文件与 `dist/assets/` 实际文件是否一一对应；缺文件时 Nginx 会回退到 `index.html`（`try_files $uri $uri/ /index.html;`）。新版 `nginx.proxy.conf` 已对 `/assets/` 增加 `try_files $uri =404;`，缺失资源会变成明确的 404，便于定位。
 
-- `better-sqlite3` 安装失败：Node 版本与服务器不匹配或缺编译工具，参考第 2 节。
+- `@libsql/client` 本地 `file:` 库打不开：确认 Node >= 20 且预编译二进制可用（远程 Turso 不受影响）。
 - 管理端 403：确认 `ADMIN_KEY` 已配置且与服务端一致，修改后重启。
 - 审核任务卡在 `reviewing`：审核队列在进程内，**服务重启不会自动恢复**。可让用户重新提交该环节；如需清理历史脏数据，停止 API 后执行：
   ```sql
@@ -225,3 +227,32 @@ sudo nginx -t && sudo systemctl reload nginx
 - [ ] 每日数据库 + 上传目录备份已配置并演练过恢复
 - [ ] 重启 API 后审核卡住的处理流程已确认
 - [ ] 磁盘、内存、日志轮转监控已就绪
+
+## 11. Vercel 部署（可选，services 模式）
+
+仓库根目录的 `vercel.json` 把一个 Vercel 项目拆成两个 service：`api`（Hono）与 `web`（Vite 静态站），由顶层 rewrites 路由：
+
+- `/api/(.*)` → `api` service；`/uploads/(.*)` → `api` service；`/(.*)` → `web` service。
+- Vercel 会把原始路径原样转发给服务（不剥 `/api` 前缀），因此 API 在 `apps/api/src/app.ts` 同时注册了带 `/api` 前缀的路由；本地 vite proxy / nginx 仍走无前缀路由，互不影响。
+- `web` service 内配置了 SPA rewrite（`/(.*)` → `/index.html`），保证 Vue Router history 模式深链可直达。
+- 两个 service 之间没有服务端调用（前端是浏览器直连公开 `/api`），因此没有声明 bindings。
+
+Vercel 项目需配置的环境变量（Dashboard → Project → Settings → Environment Variables）：
+
+| 变量 | 说明 |
+| --- | --- |
+| `ADMIN_KEY` | 管理端鉴权密钥（必填，强随机值） |
+| `LLM_BASE_URL` | 自定义大模型 Base URL（OpenAI 兼容，必填） |
+| `LLM_MODEL` | 模型名（必填） |
+| `LLM_API_KEY` | 可选；自建服务无需鉴权时可留空 |
+| `DATABASE_URL` | 持久化数据库（推荐 Turso）：`libsql://<db>.turso.io`（必填，否则数据落在临时 `/tmp`） |
+| `DATABASE_AUTH_TOKEN` | Turso 访问令牌 |
+
+图片存储：在 Vercel 上连接 **Vercel Blob** 存储（Storage 面板添加，会自动注入 `BLOB_READ_WRITE_TOKEN`），上传即写入 Blob 并返回公开 URL，前端直接渲染；未配置时回退本地目录（Vercel 上为临时 `/tmp`，仅演示）。
+
+本地联调：安装 Vercel CLI 后在仓库根目录运行 `vercel dev`，会同时启动两个 service 并注入绑定变量；API 本地直跑用 `pnpm dev`（默认 `file:data/odin.db`）。
+
+> **剩余限制**：
+> 1. 审核队列是进程内后台任务，serverless 返回响应后不保证执行完成，生产需改用 Vercel Queues / Cron 或独立 worker；
+> 2. LLM 审核最长约 60s×3 次重试，可给 api service 配置 `functions` 的 `maxDuration` 调大（如 300s+）；
+> 3. Vercel 上 Hono 的 `serveStatic()` 不生效，旧数据中相对 `/uploads/*` 的图片地址不会显示（新上传走 Blob 不受影响）。

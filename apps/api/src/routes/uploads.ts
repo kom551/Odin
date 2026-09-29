@@ -1,14 +1,10 @@
-import { createHash, randomUUID } from 'node:crypto'
-import { mkdirSync, writeFileSync } from 'node:fs'
-import path from 'node:path'
-
 import { Hono } from 'hono'
 import { fileTypeFromBuffer } from 'file-type'
 
-import { getUploadsDir } from '../config'
 import { getDb } from '../db/client'
 import { uploads } from '../db/schema'
 import { userAuth } from '../middlewares/userAuth'
+import { saveImage, sha256Of } from '../services/storage'
 import { openAiError } from './error'
 
 const ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/webp'])
@@ -42,28 +38,20 @@ uploadsRoute.post('/', async (c) => {
     return c.json(openAiError('invalid_request_error', '仅支持 jpg/png/webp 图片', 400), 400)
   }
 
-  const now = new Date()
-  const y = String(now.getFullYear())
-  const m = String(now.getMonth() + 1).padStart(2, '0')
-  const filename = `${randomUUID()}.${type.ext}`
-  const rel = path.join(y, m, filename)
-  const dir = path.join(getUploadsDir(), y, m)
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(path.join(dir, filename), buffer)
+  const saved = await saveImage(buffer, type.ext)
 
-  const url = `/uploads/${rel}`
-  getDb()
+  await getDb()
     .insert(uploads)
     .values({
-      url,
-      path: rel,
+      url: saved.url,
+      path: saved.path,
       mime: type.mime,
       size: buffer.length,
-      sha256: createHash('sha256').update(buffer).digest('hex'),
+      sha256: sha256Of(buffer),
       uploadedBy: 'client',
       createdAt: Date.now(),
     })
     .run()
 
-  return c.json({ status: 200, message: 'ok', data: { url } })
+  return c.json({ status: 200, message: 'ok', data: { url: saved.url } })
 })

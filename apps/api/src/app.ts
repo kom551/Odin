@@ -39,6 +39,14 @@ export function createApp(): Hono {
   app.route('/admin', adminRoute)
   app.route('/', tasksRoute)
 
+  // Vercel services 模式：顶层 rewrite 会把原始路径原样转发给服务（/api/... 前缀不剥离），
+  // 因此再挂一份带 /api 前缀的路由；本地 vite proxy / nginx 会先剥掉 /api，仍走无前缀路由。
+  app.route('/api/auth', authRoute)
+  app.route('/api', healthRoute)
+  app.route('/api/uploads', uploadsRoute)
+  app.route('/api/admin', adminRoute)
+  app.route('/api', tasksRoute)
+
   // 静态图片（/uploads/* → data/uploads/*）
   app.use(
     '/uploads/*',

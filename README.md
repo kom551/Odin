@@ -7,7 +7,8 @@
 - Monorepo：pnpm workspace（`apps/*` + `packages/*`）
 - 前端：Vue 3.5 · Vite 7 · TypeScript · Pinia · Vue Router · Tailwind CSS 3
 - 后端：Hono 4 · @hono/node-server · tsx（开发）· tsup（构建）
-- 持久化：SQLite（better-sqlite3）+ Drizzle ORM，启动时自动建库迁移
+- 持久化：libSQL（本地 SQLite 文件或 Turso 托管库）+ Drizzle ORM，启动时自动建库迁移
+- 图片存储：本地 `data/uploads`（开发 / Nginx 部署）；Vercel 上自动切换 Vercel Blob
 - 业务模块：任务审核系统（发布任务 → 逐环节上传图片 → LLM 视觉审核 → 6 位通关码）
 - 同构：`@odin/shared`（zod schema / 模型注册表 / 类型）前后端共用
 - 测试：Vitest（前端单测）· 网关冒烟测试（`pnpm smoke`）
@@ -38,7 +39,7 @@ cp apps/api/.env.example apps/api/.env   # 填入至少一个供应商 Key
 pnpm dev
 ```
 
-SQLite 数据库默认生成在 `apps/api/data/odin.db`，启动时自动应用 `apps/api/drizzle/` 下的迁移；可通过 `DATABASE_PATH` 覆盖路径。
+数据库默认使用本地文件 `apps/api/data/odin.db`（`file:data/odin.db`），启动时自动应用 `apps/api/drizzle/` 下的迁移；生产可配置 Turso 托管库：`DATABASE_URL=libsql://...` + `DATABASE_AUTH_TOKEN=...`。
 
 任务审核系统需要配置 `ADMIN_KEY`（管理页鉴权）与自定义大模型（OpenAI 兼容接口）：`LLM_BASE_URL`（必填）+ `LLM_MODEL`（必填），`LLM_API_KEY` 可选。
 

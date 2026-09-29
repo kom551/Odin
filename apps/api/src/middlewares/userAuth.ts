@@ -16,12 +16,13 @@ export async function userAuth(c: Context, next: Next): Promise<Response | void>
   }
 
   const db = getDb()
-  const row = db.select().from(deviceTokens).where(eq(deviceTokens.token, token)).get()
+  const row = await db.select().from(deviceTokens).where(eq(deviceTokens.token, token)).get()
   if (!row || row.expiresAt <= Date.now()) {
     return c.json(openAiError('unauthorized', '登录已过期，请重新输入访问码', 401), 401)
   }
 
-  db.update(deviceTokens)
+  await db
+    .update(deviceTokens)
     .set({ lastUsedAt: Date.now() })
     .where(eq(deviceTokens.id, row.id))
     .run()

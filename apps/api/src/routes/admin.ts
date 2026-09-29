@@ -2,7 +2,7 @@ import { randomInt } from 'node:crypto'
 
 import { Hono } from 'hono'
 import type { Context, Next } from 'hono'
-import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
+import type { LibSQLDatabase } from 'drizzle-orm/libsql'
 import { and, desc, eq } from 'drizzle-orm'
 
 import { accessCodeInputSchema, accessCodeUpdateSchema, taskCreateSchema } from '@odin/shared'
@@ -15,7 +15,7 @@ import { formatZodIssues, openAiError } from './error'
 
 export const adminRoute = new Hono()
 
-type Db = BetterSQLite3Database<typeof schema>
+type Db = LibSQLDatabase<typeof schema>
 
 async function adminAuth(c: Context, next: Next): Promise<Response | void> {
   const key = process.env.ADMIN_KEY
@@ -61,23 +61,25 @@ adminRoute.post('/tasks', async (c) => {
   const now = Date.now()
   const db = getDb()
   const taskId = Number(
-    db
-      .insert(tasks)
-      .values({
-        title: input.title,
-        description: input.description,
-        coverUrl: input.coverUrl ?? null,
-        passCode: input.passCode,
-        status: 'draft',
-        createdBy: 'admin',
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning({ id: tasks.id })
-      .get().id,
+    (
+      await db
+        .insert(tasks)
+        .values({
+          title: input.title,
+          description: input.description,
+          coverUrl: input.coverUrl ?? null,
+          passCode: input.passCode,
+          status: 'draft',
+          createdBy: 'admin',
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: tasks.id })
+        .get()
+    ).id,
   )
-  insertStages(taskId, input.stages)
-  const task = getTaskDetail(taskId)
+  await insertStages(taskId, input.stages)
+  const task = await getTaskDetail(taskId)
   return c.json({ status: 200, message: 'ok', data: task }, 201)
 })
 
@@ -85,7 +87,7 @@ adminRoute.post('/tasks', async (c) => {
 adminRoute.put('/tasks/:id', async (c) => {
   const taskId = Number(c.req.param('id'))
   const db = getDb()
-  const existing = db.select().from(tasks).where(eq(tasks.id, taskId)).get()
+  const existing = await db.select().from(tasks).where(eq(tasks.id, taskId)).get()
   if (!existing) return c.json(openAiError('not_found', '任务不存在', 404), 404)
   if (existing.status !== 'draft') {
     return c.json(openAiError('invalid_state', '仅草稿状态可编辑', 400), 400)
@@ -106,8 +108,9 @@ adminRoute.put('/tasks/:id', async (c) => {
   }
   const input = parsed.data
   const now = Date.now()
-  db.transaction((tx) => {
-    tx.update(tasks)
+  await db.transaction(async (tx) => {
+    await tx
+      .update(tasks)
       .set({
         title: input.title,
         description: input.description,
@@ -117,82 +120,90 @@ adminRoute.put('/tasks/:id', async (c) => {
       })
       .where(eq(tasks.id, taskId))
       .run()
-    tx.delete(stages).where(eq(stages.taskId, taskId)).run()
+    await tx.delete(stages).where(eq(stages.taskId, taskId)).run()
     for (let i = 0; i < input.stages.length; i += 1) {
-      insertStage(tx, taskId, i + 1, input.stages[i]!)
+      await insertStageTx(tx, taskId, i + 1, input.stages[i]!)
     }
   })
-  return c.json({ status: 200, message: 'ok', data: getTaskDetail(taskId) })
+  return c.json({ status: 200, message: 'ok', data: await getTaskDetail(taskId) })
 })
 
-adminRoute.post('/tasks/:id/publish', (c) => {
+adminRoute.post('/tasks/:id/publish', async (c) => {
   const taskId = Number(c.req.param('id'))
   const db = getDb()
-  const existing = db.select().from(tasks).where(eq(tasks.id, taskId)).get()
+  const existing = await db.select().from(tasks).where(eq(tasks.id, taskId)).get()
   if (!existing) return c.json(openAiError('not_found', '任务不存在', 404), 404)
   if (existing.status !== 'draft') {
     return c.json(openAiError('invalid_state', '仅草稿可发布', 400), 400)
   }
-  const stageCount = db.select({ id: stages.id }).from(stages).where(eq(stages.taskId, taskId)).all().length
+  const stageCount = (await db.select({ id: stages.id }).from(stages).where(eq(stages.taskId, taskId)).all()).length
   if (stageCount === 0) return c.json(openAiError('invalid_state', '任务至少需要一个环节', 400), 400)
-  db.update(tasks)
+  await db
+    .update(tasks)
     .set({ status: 'published', updatedAt: Date.now() })
     .where(eq(tasks.id, taskId))
     .run()
-  return c.json({ status: 200, message: 'ok', data: getTaskDetail(taskId) })
+  return c.json({ status: 200, message: 'ok', data: await getTaskDetail(taskId) })
 })
 
-adminRoute.post('/tasks/:id/archive', (c) => {
+adminRoute.post('/tasks/:id/archive', async (c) => {
   const taskId = Number(c.req.param('id'))
   const db = getDb()
-  const existing = db.select().from(tasks).where(eq(tasks.id, taskId)).get()
+  const existing = await db.select().from(tasks).where(eq(tasks.id, taskId)).get()
   if (!existing) return c.json(openAiError('not_found', '任务不存在', 404), 404)
-  db.update(tasks)
+  await db
+    .update(tasks)
     .set({ status: 'archived', updatedAt: Date.now() })
     .where(eq(tasks.id, taskId))
     .run()
-  return c.json({ status: 200, message: 'ok', data: getTaskDetail(taskId) })
+  return c.json({ status: 200, message: 'ok', data: await getTaskDetail(taskId) })
 })
 
-adminRoute.get('/tasks', (c) => {
+adminRoute.get('/tasks', async (c) => {
   const status = c.req.query('status')
   const db = getDb()
   const rows = status
-    ? db.select().from(tasks).where(eq(tasks.status, status as 'draft' | 'published' | 'archived')).orderBy(desc(tasks.createdAt)).all()
-    : db.select().from(tasks).orderBy(desc(tasks.createdAt)).all()
-  const data = rows.map((task) => ({
-    ...task,
-    stageCount: db.select({ id: stages.id }).from(stages).where(eq(stages.taskId, task.id)).all().length,
-    userCount: db.select({ id: progress.id }).from(progress).where(eq(progress.taskId, task.id)).all().length,
-  }))
+    ? await db.select().from(tasks).where(eq(tasks.status, status as 'draft' | 'published' | 'archived')).orderBy(desc(tasks.createdAt)).all()
+    : await db.select().from(tasks).orderBy(desc(tasks.createdAt)).all()
+  const data = await Promise.all(
+    rows.map(async (task) => ({
+      ...task,
+      stageCount: (await db.select({ id: stages.id }).from(stages).where(eq(stages.taskId, task.id)).all()).length,
+      userCount: (await db.select({ id: progress.id }).from(progress).where(eq(progress.taskId, task.id)).all()).length,
+    })),
+  )
   return c.json({ status: 200, message: 'ok', data })
 })
 
-adminRoute.get('/tasks/:id', (c) => {
-  const data = getTaskDetail(Number(c.req.param('id')))
+adminRoute.get('/tasks/:id', async (c) => {
+  const data = await getTaskDetail(Number(c.req.param('id')))
   if (!data) return c.json(openAiError('not_found', '任务不存在', 404), 404)
   return c.json({ status: 200, message: 'ok', data })
 })
 
 /** 验收概览：环节统计 + 通关用户 */
-adminRoute.get('/tasks/:id/stats', (c) => {
+adminRoute.get('/tasks/:id/stats', async (c) => {
   const taskId = Number(c.req.param('id'))
   const db = getDb()
-  const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get()
+  const task = await db.select().from(tasks).where(eq(tasks.id, taskId)).get()
   if (!task) return c.json(openAiError('not_found', '任务不存在', 404), 404)
 
-  const stageRows = db.select().from(stages).where(eq(stages.taskId, taskId)).orderBy(stages.order).all()
-  const stageStats = stageRows.map((stage) => {
-    const all = db.select({ id: submissions.id }).from(submissions).where(eq(submissions.stageId, stage.id)).all().length
-    const passed = db
-      .select({ id: submissions.id })
-      .from(submissions)
-      .where(and(eq(submissions.stageId, stage.id), eq(submissions.status, 'passed')))
-      .all().length
-    return { stageId: stage.id, order: stage.order, title: stage.title, submitted: all, passed }
-  })
+  const stageRows = await db.select().from(stages).where(eq(stages.taskId, taskId)).orderBy(stages.order).all()
+  const stageStats = await Promise.all(
+    stageRows.map(async (stage) => {
+      const all = (await db.select({ id: submissions.id }).from(submissions).where(eq(submissions.stageId, stage.id)).all()).length
+      const passed = (
+        await db
+          .select({ id: submissions.id })
+          .from(submissions)
+          .where(and(eq(submissions.stageId, stage.id), eq(submissions.status, 'passed')))
+          .all()
+      ).length
+      return { stageId: stage.id, order: stage.order, title: stage.title, submitted: all, passed }
+    }),
+  )
 
-  const completed = db
+  const completed = await db
     .select({ completedAt: progress.completedAt })
     .from(progress)
     .where(and(eq(progress.taskId, taskId), eq(progress.status, 'completed')))
@@ -209,18 +220,18 @@ adminRoute.get('/tasks/:id/stats', (c) => {
   })
 })
 
-adminRoute.get('/submissions', (c) => {
+adminRoute.get('/submissions', async (c) => {
   const taskId = c.req.query('taskId')
   const status = c.req.query('status')
   const db = getDb()
   const conditions = []
   if (taskId) conditions.push(eq(submissions.taskId, Number(taskId)))
   if (status) conditions.push(eq(submissions.status, status as 'pending' | 'reviewing' | 'passed' | 'rejected'))
-  const rows = (conditions.length
-    ? db.select().from(submissions).where(and(...conditions)).orderBy(desc(submissions.createdAt)).all()
-    : db.select().from(submissions).orderBy(desc(submissions.createdAt)).all())
+  const rows = conditions.length
+    ? await db.select().from(submissions).where(and(...conditions)).orderBy(desc(submissions.createdAt)).all()
+    : await db.select().from(submissions).orderBy(desc(submissions.createdAt)).all()
   const stageMap = new Map(
-    db.select().from(stages).all().map((s) => [s.id, s]),
+    (await db.select().from(stages).all()).map((s) => [s.id, s]),
   )
   const data = rows.map((row) => ({
     ...row,
@@ -229,24 +240,24 @@ adminRoute.get('/submissions', (c) => {
   return c.json({ status: 200, message: 'ok', data })
 })
 
-adminRoute.get('/progress', (c) => {
+adminRoute.get('/progress', async (c) => {
   const taskId = c.req.query('taskId')
   const db = getDb()
   const conditions = []
   if (taskId) conditions.push(eq(progress.taskId, Number(taskId)))
   const rows = conditions.length
-    ? db.select().from(progress).where(and(...conditions)).orderBy(desc(progress.updatedAt)).all()
-    : db.select().from(progress).orderBy(desc(progress.updatedAt)).all()
+    ? await db.select().from(progress).where(and(...conditions)).orderBy(desc(progress.updatedAt)).all()
+    : await db.select().from(progress).orderBy(desc(progress.updatedAt)).all()
   return c.json({ status: 200, message: 'ok', data: rows })
 })
 
-adminRoute.post('/progress/:id/reset', (c) => {
+adminRoute.post('/progress/:id/reset', async (c) => {
   const progressId = Number(c.req.param('id'))
   const db = getDb()
-  const row = db.select().from(progress).where(eq(progress.id, progressId)).get()
+  const row = await db.select().from(progress).where(eq(progress.id, progressId)).get()
   if (!row) return c.json(openAiError('not_found', '进度不存在', 404), 404)
-  resetProgress(progressId)
-  return c.json({ status: 200, message: 'ok', data: getProgressDetail(progressId) })
+  await resetProgress(progressId)
+  return c.json({ status: 200, message: 'ok', data: await getProgressDetail(progressId) })
 })
 
 const ACCESS_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -260,9 +271,9 @@ function generateAccessCode(): string {
 }
 
 /** 访问码列表 */
-adminRoute.get('/access-codes', (c) => {
+adminRoute.get('/access-codes', async (c) => {
   const db = getDb()
-  const rows = db.select().from(accessCodes).orderBy(desc(accessCodes.createdAt)).all()
+  const rows = await db.select().from(accessCodes).orderBy(desc(accessCodes.createdAt)).all()
   return c.json({ status: 200, message: 'ok', data: rows })
 })
 
@@ -281,26 +292,28 @@ adminRoute.post('/access-codes', async (c) => {
 
   const db = getDb()
   const code = parsed.data.code?.toUpperCase() || generateAccessCode()
-  const dup = db.select({ id: accessCodes.id }).from(accessCodes).where(eq(accessCodes.code, code)).get()
+  const dup = await db.select({ id: accessCodes.id }).from(accessCodes).where(eq(accessCodes.code, code)).get()
   if (dup) {
     return c.json(openAiError('invalid_request_error', '访问码已存在，请更换或留空自动生成', 400), 400)
   }
 
   const now = Date.now()
   const id = Number(
-    db
-      .insert(accessCodes)
-      .values({
-        code,
-        remark: parsed.data.remark ?? null,
-        status: 'active',
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning({ id: accessCodes.id })
-      .get().id,
+    (
+      await db
+        .insert(accessCodes)
+        .values({
+          code,
+          remark: parsed.data.remark ?? null,
+          status: 'active',
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: accessCodes.id })
+        .get()
+    ).id,
   )
-  const row = db.select().from(accessCodes).where(eq(accessCodes.id, id)).get()
+  const row = await db.select().from(accessCodes).where(eq(accessCodes.id, id)).get()
   return c.json({ status: 200, message: 'ok', data: row }, 201)
 })
 
@@ -319,10 +332,11 @@ adminRoute.put('/access-codes/:id', async (c) => {
   }
 
   const db = getDb()
-  const existing = db.select().from(accessCodes).where(eq(accessCodes.id, accessCodeId)).get()
+  const existing = await db.select().from(accessCodes).where(eq(accessCodes.id, accessCodeId)).get()
   if (!existing) return c.json(openAiError('not_found', '访问码不存在', 404), 404)
 
-  db.update(accessCodes)
+  await db
+    .update(accessCodes)
     .set({
       status: parsed.data.status ?? existing.status,
       remark: parsed.data.remark !== undefined ? (parsed.data.remark || null) : existing.remark,
@@ -331,11 +345,11 @@ adminRoute.put('/access-codes/:id', async (c) => {
     .where(eq(accessCodes.id, accessCodeId))
     .run()
 
-  const row = db.select().from(accessCodes).where(eq(accessCodes.id, accessCodeId)).get()
+  const row = await db.select().from(accessCodes).where(eq(accessCodes.id, accessCodeId)).get()
   return c.json({ status: 200, message: 'ok', data: row })
 })
 
-function insertStages(
+async function insertStages(
   taskId: number,
   stageInputs: Array<{
     title: string
@@ -343,15 +357,19 @@ function insertStages(
     reviewType: 'auto' | 'llm'
     reviewPrompt?: string
   }>,
-): void {
+): Promise<void> {
   const db = getDb()
-  db.transaction((tx) => {
-    stageInputs.forEach((stage, index) => insertStage(tx, taskId, index + 1, stage))
+  await db.transaction(async (tx) => {
+    for (let i = 0; i < stageInputs.length; i += 1) {
+      await insertStageTx(tx, taskId, i + 1, stageInputs[i]!)
+    }
   })
 }
 
-function insertStage(
-  tx: Db,
+type StageTx = Parameters<Parameters<Db['transaction']>[0]>[0]
+
+async function insertStageTx(
+  tx: StageTx,
   taskId: number,
   order: number,
   stage: {
@@ -360,8 +378,9 @@ function insertStage(
     reviewType: 'auto' | 'llm'
     reviewPrompt?: string
   },
-): void {
-  tx.insert(stages)
+): Promise<void> {
+  await tx
+    .insert(stages)
     .values({
       taskId,
       order,
@@ -374,15 +393,15 @@ function insertStage(
     .run()
 }
 
-function getTaskDetail(taskId: number): (typeof tasks.$inferSelect & { stages: unknown[] }) | null {
+async function getTaskDetail(taskId: number): Promise<(typeof tasks.$inferSelect & { stages: unknown[] }) | null> {
   const db = getDb()
-  const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get()
+  const task = await db.select().from(tasks).where(eq(tasks.id, taskId)).get()
   if (!task) return null
-  const stageRows = db.select().from(stages).where(eq(stages.taskId, taskId)).orderBy(stages.order).all()
+  const stageRows = await db.select().from(stages).where(eq(stages.taskId, taskId)).orderBy(stages.order).all()
   return { ...task, stages: stageRows }
 }
 
-function getProgressDetail(progressId: number): unknown {
+async function getProgressDetail(progressId: number): Promise<unknown> {
   const db = getDb()
   return db.select().from(progress).where(eq(progress.id, progressId)).get()
 }
